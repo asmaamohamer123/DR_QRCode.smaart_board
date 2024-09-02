@@ -25,7 +25,6 @@ class _LecturesScreenState extends State<LecturesScreen> {
   bool _isLoading = false;
   String? _barcodeData;
   late final List<Widget> _pages;
-
   @override
   void initState() {
     super.initState();
