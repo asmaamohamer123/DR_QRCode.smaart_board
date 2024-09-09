@@ -11,8 +11,6 @@ void main() async {
   // تهيئة Firebase
   await Firebase.initializeApp();
 
-  
-
   runApp(const MyApp());
 }
 
