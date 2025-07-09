@@ -1,4 +1,4 @@
-import 'dart:io';
+ import 'dart:io';
 import 'dart:typed_data';
 import 'package:flutter/material.dart';
 import 'package:cloud_firestore/cloud_firestore.dart';
@@ -10,7 +10,8 @@ import 'package:firebase_storage/firebase_storage.dart';
 import 'package:pdf/pdf.dart';
 import 'package:pdf/widgets.dart' as pw;
 import 'package:printing/printing.dart';
-import 'package:flutter_barcode_scanner/flutter_barcode_scanner.dart'; // استيراد مكتبة مسح الباركود
+import 'package:flutter_barcode_scanner/flutter_barcode_scanner.dart';
+import 'package:http/http.dart' as http; // استيراد مكتبة http
 
 class LecturesScreen extends StatefulWidget {
   const LecturesScreen({super.key, required this.title});
@@ -25,6 +26,7 @@ class _LecturesScreenState extends State<LecturesScreen> {
   bool _isLoading = false;
   String? _barcodeData;
   late final List<Widget> _pages;
+
   @override
   void initState() {
     super.initState();
@@ -57,7 +59,6 @@ class _LecturesScreenState extends State<LecturesScreen> {
         try {
           Uint8List fileBytes = await File(filePath).readAsBytes();
 
-          // تعديل اسم الملف بإضافة تاريخ ووقت التحميل أو معرف فريد
           String uniqueFileName =
               "${DateTime.now().millisecondsSinceEpoch}_$fileName";
 
@@ -107,132 +108,139 @@ class _LecturesScreenState extends State<LecturesScreen> {
     }
   }
 
- Future<void> _scanBarcode() async {
-  try {
-    // بدء عملية مسح الباركود
-    String barcodeScanRes = await FlutterBarcodeScanner.scanBarcode(
-        '#ff6666', 'إلغاء', true, ScanMode.BARCODE);
+  Future<void> _scanBarcode() async {
+    try {
+      String barcodeScanRes = await FlutterBarcodeScanner.scanBarcode(
+          '#ff6666', 'إلغاء', true, ScanMode.BARCODE);
 
-    if (barcodeScanRes != '-1') {
-      // تم الحصول على البيانات من الباركود
-      setState(() {
-        _barcodeData = barcodeScanRes;
-        _isLoading = true;
-      });
+      if (barcodeScanRes != '-1') {
+        setState(() {
+          _barcodeData = barcodeScanRes;
+          _isLoading = true;
+        });
 
-      // طلب اسم الملف من المستخدم باستخدام نافذة منبثقة
-      String? fileName = await _askForFileName(context);
+        String? fileName = await _askForFileName(context);
 
-      if (fileName != null && fileName.isNotEmpty) {
-        try {
-          Uint8List fileBytes;
+        if (fileName != null && fileName.isNotEmpty) {
+          try {
+            Uri? url = Uri.tryParse(_barcodeData ?? '');
+            if (url != null && (url.isScheme('http') || url.isScheme('https'))) {
+              final response = await http.get(url);
 
-          // تحويل النص إلى PDF
-          final pdf = pw.Document();
-          pdf.addPage(
-            pw.Page(
-              build: (pw.Context context) {
-                return pw.Center(
-                  child: pw.Text(_barcodeData!),
+              if (response.statusCode == 200) {
+                String pageContent = response.body;
+
+                final pdf = pw.Document();
+                pdf.addPage(
+                  pw.MultiPage(
+                    build: (pw.Context context) => [
+                      pw.Text(
+                        pageContent,
+                        style: const pw.TextStyle(fontSize: 12),
+                      ),
+                    ],
+                  ),
                 );
-              },
-            ),
-          );
 
-          fileBytes = await pdf.save();
+                Uint8List fileBytes = await pdf.save();
 
-          Reference storageRef =
-              FirebaseStorage.instance.ref().child('uploads/$fileName.pdf');
-          UploadTask uploadTask = storageRef.putData(fileBytes);
+                Reference storageRef = FirebaseStorage.instance
+                    .ref()
+                    .child('uploads/$fileName.pdf');
 
-          await uploadTask.whenComplete(() async {
-            String downloadURL = await storageRef.getDownloadURL();
+                UploadTask uploadTask = storageRef.putData(fileBytes);
 
-            String subCollectionName =
-                _selectedIndex == 0 ? 'lectures' : 'assignments';
-            String subjectName = widget.title;
+                await uploadTask.whenComplete(() async {
+                  String downloadURL = await storageRef.getDownloadURL();
 
-            await FirebaseFirestore.instance
-                .collection('subjects')
-                .doc(subjectName)
-                .collection(subCollectionName)
-                .add({
-              'file_name': '$fileName.pdf',
-              'file_url': downloadURL,
-              'created_at': Timestamp.now(),
-            });
+                  String subCollectionName =
+                      _selectedIndex == 0 ? 'lectures' : 'assignments';
 
+                  await FirebaseFirestore.instance
+                      .collection('subjects')
+                      .doc(widget.title)
+                      .collection(subCollectionName)
+                      .add({
+                    'file_name': '$fileName.pdf',
+                    'file_url': downloadURL,
+                    'source_url': url.toString(),
+                    'created_at': Timestamp.now(),
+                  });
+
+                  ScaffoldMessenger.of(context).showSnackBar(
+                    const SnackBar(content: Text('تم حفظ محتوى الرابط داخل PDF ورفعه')),
+                  );
+                });
+              } else {
+                throw Exception('فشل في تحميل الرابط: ${response.statusCode}');
+              }
+            } else {
+              throw Exception('الباركود لا يحتوي على رابط صحيح');
+            }
+          } catch (e) {
             ScaffoldMessenger.of(context).showSnackBar(
-              const SnackBar(content: Text('تم رفع الملف من الباركود بنجاح')),
+              SnackBar(content: Text('فشل أثناء حفظ محتوى الرابط: $e')),
             );
-          });
-        } catch (e) {
-          ScaffoldMessenger.of(context).showSnackBar(
-            SnackBar(content: Text('فشل في رفع الملف من الباركود: $e')),
-          );
-        } finally {
+          } finally {
+            setState(() {
+              _isLoading = false;
+            });
+          }
+        } else {
           setState(() {
             _isLoading = false;
           });
+          ScaffoldMessenger.of(context).showSnackBar(
+            const SnackBar(content: Text('يجب إدخال اسم للملف')),
+          );
         }
       } else {
-        // المستخدم لم يُدخل اسمًا للملف
-        setState(() {
-          _isLoading = false;  // إيقاف اللودينج عند عدم إدخال اسم
-        });
         ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(content: Text('يجب إدخال اسم للملف')),
+          const SnackBar(content: Text('فشل في قراءة الباركود')),
         );
       }
-    } else {
-      // فشل في قراءة الباركود أو تم الإلغاء
+    } catch (e) {
+      setState(() {
+        _isLoading = false;
+      });
       ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text('فشل في قراءة الباركود')),
+        SnackBar(content: Text('حدث خطأ أثناء مسح الباركود: $e')),
       );
     }
-  } catch (e) {
-    setState(() {
-      _isLoading = false;  // إيقاف اللودينج عند حدوث خطأ
-    });
-    ScaffoldMessenger.of(context).showSnackBar(
-      SnackBar(content: Text('حدث خطأ أثناء مسح الباركود: $e')),
+  }
+
+  Future<String?> _askForFileName(BuildContext context) async {
+    TextEditingController fileNameController = TextEditingController();
+    return showDialog<String>(
+      context: context,
+      builder: (BuildContext context) {
+        return AlertDialog(
+          title: const Text('أدخل اسم الملف'),
+          content: TextField(
+            controller: fileNameController,
+            decoration: const InputDecoration(hintText: "أدخل اسم المحاضرة"),
+          ),
+          actions: <Widget>[
+            TextButton(
+              child: const Text('إلغاء'),
+              onPressed: () {
+                Navigator.of(context).pop();
+                setState(() {
+                  _isLoading = false;
+                });
+              },
+            ),
+            TextButton(
+              child: const Text('حفظ'),
+              onPressed: () {
+                Navigator.of(context).pop(fileNameController.text);
+              },
+            ),
+          ],
+        );
+      },
     );
   }
-}
-
-// دالة تطلب اسم الملف من المستخدم
-Future<String?> _askForFileName(BuildContext context) async {
-  TextEditingController fileNameController = TextEditingController();
-  return showDialog<String>(
-    context: context,
-    builder: (BuildContext context) {
-      return AlertDialog(
-        title: const Text('أدخل اسم الملف'),
-        content: TextField(
-          controller: fileNameController,
-          decoration: const InputDecoration(hintText: "أدخل اسم المحاضرة"),
-        ),
-        actions: <Widget>[
-          TextButton(
-            child: const Text('إلغاء'),
-            onPressed: () {
-              Navigator.of(context).pop();
-                setState(() {
-            _isLoading = false;
-          });
-            },
-          ),
-          TextButton(
-            child: const Text('حفظ'),
-            onPressed: () {
-              Navigator.of(context).pop(fileNameController.text);
-            },
-          ),
-        ],
-      );
-    },
-  );
-}
 
   @override
   Widget build(BuildContext context) {
@@ -276,37 +284,38 @@ Future<String?> _askForFileName(BuildContext context) async {
         selectedItemColor: Colors.white,
         onTap: _onItemTapped,
       ),
-
-      floatingActionButton:
-          _selectedIndex == 0 // تحقق من أن الفهرس هو 0 (المحاضرات)
-              ? Padding(
-               padding: EdgeInsets.fromLTRB(0.0, 0.0, 30.0, 0.0),
-                child: Row(
-                  children: [
-                    FloatingActionButton.extended(
-                      onPressed: _pickAndUploadFile,
-                      label: const Text('إضافة محاضرة'),
-                      icon: const Icon(Icons.add),
-                      heroTag: 'uploadButton', // تعيين tag فريد
-                    ),
-                    const SizedBox(width: 50),
-                    FloatingActionButton.extended(
+      floatingActionButton: _selectedIndex == 0
+          ? Padding(
+              padding: EdgeInsets.fromLTRB(0.0, 0.0, 30.0, 0.0),
+              child: Row(
+                children: [
+                  FloatingActionButton.extended(
+                    onPressed: _pickAndUploadFile,
+                    label: const Text('إضافة محاضرة'),
+                    icon: const Icon(Icons.add),
+                    heroTag: 'uploadButton',
+                  ),
+                  const SizedBox(width: 50),
+                  Padding(
+                    padding: EdgeInsets.fromLTRB(0.0, 0.0, 0.0, 0.0),
+                    child: FloatingActionButton.extended(
                       onPressed: _scanBarcode,
                       label: const Text('مسح الباركود'),
                       icon: const Icon(Icons.qr_code_scanner),
-                      heroTag: 'scanButton', // تعيين tag فريد
+                      heroTag: 'scanButton',
                     ),
-                  ],
-                ),
-              )
-              : _selectedIndex == 1 // تحقق من أن الفهرس هو 1 (التاسكات)
-                  ? FloatingActionButton.extended(
-                      onPressed: _pickAndUploadFile,
-                      label: const Text('إضافة تاسك'),
-                      icon: const Icon(Icons.add),
-                      heroTag: 'uploadTaskButton', // تعيين tag فريد للتاسكات
-                    )
-                  : null,
+                  ),
+                ],
+              ),
+            )
+          : _selectedIndex == 1
+              ? FloatingActionButton.extended(
+                  onPressed: _pickAndUploadFile,
+                  label: const Text('إضافة تاسك'),
+                  icon: const Icon(Icons.add),
+                  heroTag: 'uploadTaskButton',
+                )
+              : null,
     );
   }
 }
